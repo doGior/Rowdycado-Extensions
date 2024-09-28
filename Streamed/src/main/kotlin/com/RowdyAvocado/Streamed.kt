@@ -17,6 +17,7 @@ import com.lagradost.cloudstream3.MainPageRequest
 import com.lagradost.cloudstream3.SubtitleFile
 import com.lagradost.cloudstream3.TvType
 import com.lagradost.cloudstream3.app
+
 import com.lagradost.cloudstream3.mainPageOf
 import com.lagradost.cloudstream3.newHomePageResponse
 import com.lagradost.cloudstream3.utils.AppUtils.parseJson
@@ -82,11 +83,13 @@ class Streamed(val plugin: StreamedPlugin) : MainAPI() {
     /**
      * Gets the sources from the API
      */
-    private suspend fun Match.getSources(): List<List<Source>>{
-        val requestsList = this.matchSources.map { (source, id) ->
-            app.get("$mainUrl/api/stream/${source}/$id").body.string() }
+    private suspend fun Match.getSources(): Map<String, List<Source>> {
 
-        val sourceObjectList = requestsList.map { parseJson<List<Source>>(it) }
+        var sourceObjectList: LinkedHashMap<String, List<Source>> = linkedMapOf()
+        this.matchSources.forEach { (source, id) ->
+            sourceObjectList[source] =
+                parseJson<List<Source>>(app.get("$mainUrl/api/stream/${source}/$id").body.string())
+        }
 
         return sourceObjectList
     }
@@ -94,13 +97,14 @@ class Streamed(val plugin: StreamedPlugin) : MainAPI() {
 
     //Get the Homepage
     override suspend fun getMainPage(page: Int, request: MainPageRequest): HomePageResponse {
-        Log.d("BANANA", "request data:${request.data}")
+        val TAG = "STREAMED:MainPage"
+        Log.d(TAG, "Url:${request.data}")
         val rawList = app.get(request.data).body.string()
         val listJson = parseJson<List<Match>>(rawList)
 
-        Log.d("BANANA", "Element: ${listJson[0]}")
-        Log.d("BANANA", "Teams: ${listJson[0].teams}")
-        Log.d("BANANA", "Sources: ${listJson[0].getSources()}")
+        Log.d(TAG, "Element: ${listJson[0]}")
+        Log.d(TAG, "Teams: ${listJson[0].teams}")
+        Log.d(TAG, "Sources: ${listJson[0].getSources().values}")
 
 
         val list = searchResponseBuilder(listJson) { match ->
@@ -117,8 +121,6 @@ class Streamed(val plugin: StreamedPlugin) : MainAPI() {
     }
 
 
-
-
     // This function gets called when you search for something also
     //This is to get Title,Href,Posters for Homepage
     override suspend fun search(query: String): List<SearchResponse> {
@@ -130,12 +132,12 @@ class Streamed(val plugin: StreamedPlugin) : MainAPI() {
         return searchResults
     }
 
-    private suspend fun Source.getMatch(): Match? {
+    private suspend fun Source.getMatch(id: String): Match? {
         val allMatches = app.get("$mainUrl/api/matches/all").body.string()
         val allMatchesJson = parseJson<List<Match>>(allMatches)
         val matchesList = allMatchesJson.filter { match ->
             match.matchSources.isNotEmpty() &&
-                    match.matchSources.any { it.id == this.id && it.sourceName == this.source }
+                    match.matchSources.any { it.id == id && it.sourceName == this.source }
         }
         if (matchesList.isEmpty()) {
             return null
@@ -145,37 +147,42 @@ class Streamed(val plugin: StreamedPlugin) : MainAPI() {
 
     // This function gets called when you enter the page/show
     override suspend fun load(url: String): LoadResponse {
-        Log.d("LAMPONE", "URL: $url")
+        val TAG = "STREAMED:Item"
+
+        Log.d(TAG, "URL: $url")
         if (url == "null") {
             throw ErrorLoadingException("The stream is not available")
         }
         val request = app.get(url)
         if (!request.isSuccessful) {
-            Log.d("LAMPONE", "CODE: ${request.code}")
+            Log.d(TAG, "CODE: ${request.code}")
             throw ErrorLoadingException("Cannot get info from the API")
         }
+
         val rawJson = request.body.string()
-        Log.d("LAMPONE", "Response: ${app.get(url)}")
+        Log.d(TAG, "Response: ${app.get(url)}")
         val data = parseJson<List<Source>>(rawJson)
 
         var elementName = "No Info Yet"
-        var elementUrl = ""
         var elementPlot: String? = null
         var elementPoster: String? = null
         var elementTags: ArrayList<String> = arrayListOf()
         if (data.isNotEmpty()) {
-            val relatedMatch = data[0].getMatch()
+            val sourceID = url.substringAfterLast('/')
+            Log.d(TAG, "Source ID: $sourceID")
+            val relatedMatch = data[0].getMatch(sourceID)
             if (relatedMatch != null) {
-                    val isHD = if(data[0].isHD) "HD" else ""
-                    elementName = relatedMatch.title
-                    elementPlot = "${relatedMatch.title}      $isHD"
-                    elementPoster = "$mainUrl${relatedMatch.posterPath ?: "/api/images/poster/fallback.png"}"
-                    elementTags = arrayListOf(relatedMatch.category.capitalize())
-                    val teams = relatedMatch.teams?.values?.mapNotNull { it!!.name!! }
-                    if (teams != null) {
-                        elementTags.addAll(teams)
-                    }
-            }else{
+                val isHD = if (data[0].isHD) "HD" else ""
+                elementName = relatedMatch.title
+                elementPlot = "${relatedMatch.title}      $isHD"
+                elementPoster =
+                    "$mainUrl${relatedMatch.posterPath ?: "/api/images/poster/fallback.png"}"
+                elementTags = arrayListOf(relatedMatch.category.capitalize())
+                val teams = relatedMatch.teams?.values?.mapNotNull { it!!.name!! }
+                if (teams != null) {
+                    elementTags.addAll(teams)
+                }
+            } else {
                 elementName = data[0].id.toString()
             }
         }
@@ -190,7 +197,7 @@ class Streamed(val plugin: StreamedPlugin) : MainAPI() {
             posterUrl = elementPoster,
             tags = elementTags
         )
-        Log.d("LAMPONE", "Data: $liveStream")
+        Log.d(TAG, "LiveStream: $liveStream")
         return liveStream
     }
 
@@ -201,28 +208,27 @@ class Streamed(val plugin: StreamedPlugin) : MainAPI() {
         subtitleCallback: (SubtitleFile) -> Unit,
         callback: (ExtractorLink) -> Unit
     ): Boolean {
+        val TAG = "STREAMED:Links"
 
+//        Log.d(TAG, "Url : $data")
+        val rawJson = app.get(data).body.string()
+        val source = parseJson<List<Source>>(rawJson)[0]
 
+        val sourceUrlID = data.substringAfterLast("/")
+//        Log.d(TAG, "Source ID: $sourceUrlID")
 
-        // We use the callback when we are ready to invoke the links
-        /*
-        callback.invoke(
-            ExtractorLink(
-                source = this.name,
-                name = this.name,
-                url = sourceurl,
-                referer = "",
-                quality = Qualities.Unknown.value,
-                isM3u8 = false
+        val match = source.getMatch(sourceUrlID)
+//        Log.d(TAG, "Match: $match")
+
+        match?.matchSources?.forEach { matchSource ->
+            Log.d(TAG, "URLS: $mainUrl/api/stream/${matchSource.sourceName}/${matchSource.id}")
+            StreamedExtractor().getUrl(
+                url = "$mainUrl/api/stream/${matchSource.sourceName}/${matchSource.id}",
+                referer = "https://embedme.top/",
+                subtitleCallback = subtitleCallback,
+                callback = callback
             )
-        )
-        subtitleCallback.invoke(
-            SubtitleFile(
-                "eng",
-                subtitle
-            )
-        )
-        */
+        }
         return true
     }
 
